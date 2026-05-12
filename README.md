@@ -1,4 +1,4 @@
-# mrpattanapong.github.io
+# mrpattanapong.github.io (พัฒนพงษ์ ปักใคหัง) (M6802820)
 Public as Project of ENG55 1209 ARTIFICIAL INTELLIGENCE FOR ENGINEERS
 
 ## Functional 

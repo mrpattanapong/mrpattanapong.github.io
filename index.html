@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Charging Station Monitoring</title>
+   
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+   
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+   
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+
+    <!-- ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+
+
+    <!-- Font Awesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+
+    <style>
+        /* Custom Leaflet Marker Styles */
+        .custom-marker {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            border-radius: 50%;
+            border: 3px solid white;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            color: white;
+            font-size: 14px;
+            transition: transform 0.2s;
+        }
+        .custom-marker:hover {
+            transform: scale(1.1);
+        }
+        .marker-available { background-color: #10b981; } /* Emerald 500 */
+        .marker-charging { background-color: #f59e0b; } /* Amber 500 */
+        .marker-fault { background-color: #ef4444; } /* Rose 500 */
+        .marker-offline { background-color: #6b7280; } /* Gray 500 */
+       
+        /* Ensure Leaflet controls stay under modals/sidebars */
+        .leaflet-control-container { z-index: 10; }
+        .sidebar-z { z-index: 40; }
+        .modal-z { z-index: 50; }
+    </style>
+</head>
+<body class="bg-gray-50 text-slate-800 h-screen overflow-hidden">
+    <div id="app" class="h-full w-full flex flex-col relative">
+        <!-- Header -->
+        <header class="bg-slate-900 text-white p-4 shadow-md flex justify-between items-center z-20">
+            <div class="flex items-center gap-3">
+                <i class="fa-solid fa-bolt text-amber-400 text-xl"></i>
+                <h1 class="text-xl font-semibold tracking-wide">EV Network PQM System</h1>
+            </div>
+            <div class="text-sm bg-slate-800 px-3 py-1 rounded-full border border-slate-700">
+                <span class="w-2 h-2 rounded-full inline-block mr-2" :class="isConnected ? 'bg-emerald-400' : 'bg-rose-500'"></span>
+                {{ isConnected ? 'API Connected' : 'Local Mock Mode' }}
+            </div>
+        </header>
+
+
+        <!-- Main Content (Map + Sidebar) -->
+        <main class="flex-1 flex relative overflow-hidden">
+            <!-- Map Component -->
+            <map-dashboard
+                class="flex-1"
+                :stations="stations"
+                @select-station="handleStationSelect"
+            ></map-dashboard>
+
+
+            <!-- Telemetry Sidebar -->
+            <transition
+                enter-active-class="transform transition ease-in-out duration-300"
+                enter-from-class="translate-x-full"
+                enter-to-class="translate-x-0"
+                leave-active-class="transform transition ease-in-out duration-300"
+                leave-from-class="translate-x-0"
+                leave-to-class="translate-x-full">
+               
+                <aside v-if="selectedStation" class="w-96 bg-white shadow-2xl border-l border-slate-200 sidebar-z flex flex-col h-full absolute right-0 top-0">
+                    <!-- Sidebar Header -->
+                    <div class="p-5 border-b border-slate-100 flex justify-between items-start bg-slate-50">
+                        <div>
+                            <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">{{ selectedStation.station_id }}</div>
+                            <h2 class="text-lg font-bold text-slate-800">{{ selectedStation.name }}</h2>
+                        </div>
+                        <button @click="closeSidebar" class="text-slate-400 hover:text-slate-700 bg-white rounded-full p-1 shadow-sm">
+                            <i class="fa-solid fa-xmark text-lg w-6 h-6 flex items-center justify-center"></i>
+                        </button>
+                    </div>
+
+
+                    <!-- Status Badge -->
+                    <div class="px-5 py-3 border-b border-slate-100">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-slate-500">Current Status:</span>
+                            <span class="px-2.5 py-0.5 rounded-full text-xs font-medium border" :class="statusConfig[selectedStation.status].class">
+                                <i :class="statusConfig[selectedStation.status].icon" class="mr-1"></i>
+                                {{ selectedStation.status }}
+                            </span>
+                        </div>
+                    </div>
+
+
+                    <!-- Real-Time Telemetry -->
+                    <div class="p-5 flex-1 overflow-y-auto">
+                        <h3 class="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                            <i class="fa-solid fa-chart-line text-blue-500"></i> Real-Time Telemetry
+                        </h3>
+                       
+                        <div v-if="telemetry" class="grid grid-cols-2 gap-4">
+                            <!-- Voltage -->
+                            <div class="bg-blue-50 rounded-xl p-4 border border-blue-100">
+                                <div class="text-blue-500 text-xs font-bold uppercase mb-1">Voltage</div>
+                                <div class="text-2xl font-bold text-slate-800">
+                                    {{ telemetry.voltage.toFixed(1) }} <span class="text-sm font-normal text-slate-500">V</span>
+                                </div>
+                            </div>
+                           
+                            <!-- Current -->
+                            <div class="bg-indigo-50 rounded-xl p-4 border border-indigo-100">
+                                <div class="text-indigo-500 text-xs font-bold uppercase mb-1">Current</div>
+                                <div class="text-2xl font-bold text-slate-800">
+                                    {{ telemetry.current.toFixed(1) }} <span class="text-sm font-normal text-slate-500">A</span>
+                                </div>
+                            </div>
+
+
+                            <!-- Active Load -->
+                            <div class="bg-emerald-50 rounded-xl p-4 border border-emerald-100 col-span-2 flex items-center justify-between">
+                                <div>
+                                    <div class="text-emerald-600 text-xs font-bold uppercase mb-1">Active Load</div>
+                                    <div class="text-3xl font-bold text-slate-800">
+                                        {{ telemetry.load_kw.toFixed(2) }} <span class="text-base font-normal text-slate-500">kW</span>
+                                    </div>
+                                </div>
+                                <i class="fa-solid fa-bolt text-emerald-300 text-4xl opacity-50"></i>
+                            </div>
+                        </div>
+
+
+                        <div v-else class="h-40 flex items-center justify-center flex-col text-slate-400">
+                            <i class="fa-solid fa-circle-notch fa-spin text-2xl mb-2"></i>
+                            <p class="text-sm">Fetching telemetry...</p>
+                        </div>
+                    </div>
+
+
+                    <!-- Power Output Control (Curtailment) -->
+                    <div class="p-5 border-t border-slate-100 bg-white">
+                        <h3 class="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                            <i class="fa-solid fa-sliders text-rose-500"></i> Power Output Control
+                        </h3>
+                       
+                        <div class="mb-4">
+                            <div class="flex justify-between items-center mb-2">
+                                <label for="curtailment-slider" class="text-xs font-medium text-slate-600">Max Current Limit</label>
+                                <span class="text-sm font-bold" :class="curtailmentValue < 100 ? 'text-rose-600' : 'text-emerald-600'">
+                                    {{ curtailmentValue }}%
+                                </span>
+                            </div>
+                            <input
+                                id="curtailment-slider"
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="5"
+                                v-model.number="curtailmentValue"
+                                class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-rose-500"
+                            >
+                        </div>
+
+
+                        <!-- Confirm/Cancel Actions -->
+                        <transition
+                            enter-active-class="transition-all duration-200 ease-out"
+                            enter-from-class="opacity-0 translate-y-2"
+                            enter-to-class="opacity-100 translate-y-0"
+                            leave-active-class="transition-all duration-200 ease-in"
+                            leave-from-class="opacity-100 translate-y-0"
+                            leave-to-class="opacity-0 translate-y-2">
+                            <div v-if="curtailmentValue !== savedCurtailmentValue" class="flex gap-2">
+                                <button
+                                    @click="cancelCurtailment"
+                                    :disabled="isSavingCurtailment"
+                                    class="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium rounded-lg transition-colors disabled:opacity-50">
+                                    Cancel
+                                </button>
+                                <button
+                                    @click="confirmCurtailment"
+                                    :disabled="isSavingCurtailment"
+                                    class="flex-1 px-3 py-2 bg-rose-500 hover:bg-rose-600 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                                    <i v-if="isSavingCurtailment" class="fa-solid fa-circle-notch fa-spin"></i>
+                                    {{ isSavingCurtailment ? 'Applying...' : 'Confirm' }}
+                                </button>
+                            </div>
+                        </transition>
+                    </div>
+
+
+                    <!-- Actions -->
+                    <div class="p-5 border-t border-slate-200 bg-slate-50 shrink-0">
+                        <button @click="openPQM" class="w-full bg-slate-800 hover:bg-slate-900 text-white font-medium py-3 px-4 rounded-lg shadow-md transition-colors flex justify-center items-center gap-2">
+                            <i class="fa-solid fa-wave-square"></i>
+                            View Power Quality (PQM)
+                        </button>
+                    </div>
+                </aside>
+            </transition>
+        </main>
+
+
+        <!-- PQM Dashboard Modal -->
+        <transition
+            enter-active-class="transition-opacity duration-300"
+            enter-from-class="opacity-0"
+            enter-to-class="opacity-100"
+            leave-active-class="transition-opacity duration-300"
+            leave-from-class="opacity-100"
+            leave-to-class="opacity-0">
+            <pqm-dashboard
+                v-if="isPqmOpen"
+                :station="selectedStation"
+                @close="isPqmOpen = false"
+                class="absolute inset-0 modal-z">
+            </pqm-dashboard>
+        </transition>
+    </div>
+
+
+    <script>
+        const { createApp, ref, onMounted, onUnmounted, watch, nextTick } = Vue;
+
+
+        const API_BASE = 'http://localhost:8000/api/v1';
+
+
+        const FALLBACK_STATIONS = [
+            { station_id: "ST-001", name: "Central Plaza Station", latitude: 13.7563, longitude: 100.5018, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-002", name: "Sukhumvit FastCharge", latitude: 13.7367, longitude: 100.5611, status: "Charging", current_load_kw: 45.0 },
+            { station_id: "ST-003", name: "Phraeksa EV Hub", latitude: 13.5833, longitude: 100.6333, status: "Fault", current_load_kw: 0.0 },
+            { station_id: "ST-004", name: "Mega Bangna Port", latitude: 13.6468, longitude: 100.6803, status: "Offline", current_load_kw: 0.0 },
+            { station_id: "ST-005", name: "Suvarnabhumi Airport Terminal", latitude: 13.6900, longitude: 100.7501, status: "Charging", current_load_kw: 120.0 },
+            { station_id: "ST-006", name: "Samut Prakan City Hall", latitude: 13.5993, longitude: 100.5968, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-007", name: "Bang Pu Recreation Center", latitude: 13.5188, longitude: 100.6544, status: "Charging", current_load_kw: 50.0 },
+            { station_id: "ST-008", name: "IKEA Bangna", latitude: 13.6431, longitude: 100.6792, status: "Fault", current_load_kw: 0.0 },
+            { station_id: "ST-009", name: "BTS Kheha Station", latitude: 13.5760, longitude: 100.6052, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-010", name: "Asiatique The Riverfront", latitude: 13.7042, longitude: 100.5032, status: "Charging", current_load_kw: 22.0 },
+            { station_id: "ST-011", name: "Siam Paragon", latitude: 13.7468, longitude: 100.5346, status: "Charging", current_load_kw: 60.0 },
+            { station_id: "ST-012", name: "Iconsiam", latitude: 13.7266, longitude: 100.5103, status: "Offline", current_load_kw: 0.0 },
+            { station_id: "ST-013", name: "Seacon Square Srinakarin", latitude: 13.6946, longitude: 100.6481, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-014", name: "BITEC Bangna", latitude: 13.6705, longitude: 100.6105, status: "Charging", current_load_kw: 30.0 },
+            // --- ภาคเหนือ (North) ---
+            { station_id: "ST-015", name: "Central Festival Chiang Mai", latitude: 18.8066, longitude: 99.0182, status: "Charging", current_load_kw: 85.0 },
+            { station_id: "ST-016", name: "Maya Lifestyle Shopping Center", latitude: 18.8024, longitude: 98.9672, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-017", name: "Chiang Rai Clock Tower", latitude: 19.9076, longitude: 99.8309, status: "Charging", current_load_kw: 40.0 },
+            { station_id: "ST-018", name: "Lampang Railway Station", latitude: 18.2831, longitude: 99.4839, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-019", name: "Phayao Lake Viewpoint", latitude: 19.1664, longitude: 99.9022, status: "Fault", current_load_kw: 0.0 },
+
+            // --- ภาคอีสาน (Northeast) ---
+            { station_id: "ST-020", name: "Terminal 21 Korat", latitude: 14.9818, longitude: 102.1000, status: "Charging", current_load_kw: 90.0 },
+            { station_id: "ST-021", name: "Khon Kaen University", latitude: 16.4435, longitude: 102.8228, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-022", name: "Central Plaza Udon Thani", latitude: 17.4061, longitude: 102.8021, status: "Charging", current_load_kw: 55.0 },
+            { station_id: "ST-023", name: "Nong Khai Friendship Bridge", latitude: 17.8804, longitude: 102.7163, status: "Offline", current_load_kw: 0.0 },
+            { station_id: "ST-024", name: "Buriram Castle", latitude: 14.9664, longitude: 103.0945, status: "Available", current_load_kw: 0.0 },
+
+            // --- ภาคใต้ (South) ---
+            { station_id: "ST-025", name: "Central Phuket Floresta", latitude: 7.8931, longitude: 98.3672, status: "Charging", current_load_kw: 110.0 },
+            { station_id: "ST-026", name: "Patong Beach EV Hub", latitude: 7.8955, longitude: 98.2952, status: "Charging", current_load_kw: 45.0 },
+            { station_id: "ST-027", name: "Hat Yai Clock Tower", latitude: 7.0063, longitude: 100.4705, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-028", name: "Surat Thani City Pillar Shrine", latitude: 9.1416, longitude: 99.3245, status: "Fault", current_load_kw: 0.0 },
+            { station_id: "ST-029", name: "Krabi Airport (KBV)", latitude: 8.0988, longitude: 98.9859, status: "Available", current_load_kw: 0.0 },
+            // --- ภาคเหนือ (North) 15 แห่ง ---
+            { station_id: "ST-030", name: "Nimmanahaeminda EV Station (Chiang Mai)", latitude: 18.7953, longitude: 98.9664, status: "Charging", current_load_kw: 65.0 },
+            { station_id: "ST-031", name: "Chiang Mai International Airport", latitude: 18.7668, longitude: 98.9626, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-032", name: "White Temple Parking (Chiang Rai)", latitude: 19.8243, longitude: 99.7631, status: "Charging", current_load_kw: 40.0 },
+            { station_id: "ST-033", name: "Mae Fah Luang University (Chiang Rai)", latitude: 20.0450, longitude: 99.8948, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-034", name: "Kad Kong Ta Street Market (Lampang)", latitude: 18.2913, longitude: 99.5015, status: "Offline", current_load_kw: 0.0 },
+            { station_id: "ST-035", name: "Wat Phra That Hariphunchai (Lamphun)", latitude: 18.5772, longitude: 99.0083, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-036", name: "Nan Nakhon Airport", latitude: 18.8078, longitude: 100.7836, status: "Charging", current_load_kw: 30.0 },
+            { station_id: "ST-037", name: "Phrae City Hall", latitude: 18.1446, longitude: 100.1403, status: "Charging", current_load_kw: 22.0 },
+            { station_id: "ST-038", name: "Pai Walking Street (Mae Hong Son)", latitude: 19.3598, longitude: 98.4418, status: "Fault", current_load_kw: 0.0 },
+            { station_id: "ST-039", name: "Mae Sot Border Checkpoint (Tak)", latitude: 16.6908, longitude: 98.5492, status: "Charging", current_load_kw: 80.0 },
+            { station_id: "ST-040", name: "Sukhothai Historical Park", latitude: 17.0187, longitude: 99.7042, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-041", name: "Central Phitsanulok", latitude: 16.8373, longitude: 100.2435, status: "Charging", current_load_kw: 110.0 },
+            { station_id: "ST-042", name: "Khao Kho Viewpoint (Phetchabun)", latitude: 16.6300, longitude: 100.9961, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-043", name: "Nakhon Sawan Paradise Park", latitude: 15.7001, longitude: 100.1260, status: "Charging", current_load_kw: 45.0 },
+            { station_id: "ST-044", name: "Uttaradit Rajabhat University", latitude: 17.6334, longitude: 100.0933, status: "Available", current_load_kw: 0.0 },
+
+            // --- ภาคอีสาน (Northeast) 15 แห่ง ---
+            { station_id: "ST-045", name: "Khao Yai National Park Entrance (Korat)", latitude: 14.4390, longitude: 101.3721, status: "Charging", current_load_kw: 50.0 },
+            { station_id: "ST-046", name: "Premium Outlet Khao Yai", latitude: 14.6541, longitude: 101.4116, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-047", name: "Central Plaza Khon Kaen", latitude: 16.4322, longitude: 102.8236, status: "Charging", current_load_kw: 120.0 },
+            { station_id: "ST-048", name: "Khon Kaen Airport (KQC)", latitude: 16.4667, longitude: 102.7833, status: "Offline", current_load_kw: 0.0 },
+            { station_id: "ST-049", name: "UD Town (Udon Thani)", latitude: 17.4014, longitude: 102.8058, status: "Charging", current_load_kw: 85.0 },
+            { station_id: "ST-050", name: "Central Plaza Ubon Ratchathani", latitude: 15.2580, longitude: 104.8318, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-051", name: "Ubon Ratchathani University", latitude: 15.1189, longitude: 104.9015, status: "Fault", current_load_kw: 0.0 },
+            { station_id: "ST-052", name: "Chang Arena (Buriram)", latitude: 14.9658, longitude: 103.0945, status: "Charging", current_load_kw: 60.0 },
+            { station_id: "ST-053", name: "Robinson Lifestyle Surin", latitude: 14.8690, longitude: 103.4984, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-054", name: "Robinson Lifestyle Roi Et", latitude: 16.0592, longitude: 103.6766, status: "Charging", current_load_kw: 40.0 },
+            { station_id: "ST-055", name: "Sisaket Rajabhat University", latitude: 15.0970, longitude: 104.3039, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-056", name: "Chiang Khan Walking Street (Loei)", latitude: 17.8943, longitude: 101.6543, status: "Charging", current_load_kw: 22.0 },
+            { station_id: "ST-057", name: "Sakon Nakhon Airport", latitude: 17.1953, longitude: 104.1194, status: "Offline", current_load_kw: 0.0 },
+            { station_id: "ST-058", name: "Nakhon Phanom River Walk", latitude: 17.4087, longitude: 104.7891, status: "Charging", current_load_kw: 30.0 },
+            { station_id: "ST-059", name: "Mahasarakham University", latitude: 16.2447, longitude: 103.2496, status: "Available", current_load_kw: 0.0 },
+
+            // --- ภาคใต้ (South) 15 แห่ง ---
+            { station_id: "ST-060", name: "Phuket International Airport", latitude: 8.1111, longitude: 98.3065, status: "Charging", current_load_kw: 95.0 },
+            { station_id: "ST-061", name: "Phuket Old Town", latitude: 7.8804, longitude: 98.3923, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-062", name: "Kata Beach EV Point (Phuket)", latitude: 7.8188, longitude: 98.2982, status: "Charging", current_load_kw: 50.0 },
+            { station_id: "ST-063", name: "Ao Nang Beach (Krabi)", latitude: 8.0312, longitude: 98.8213, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-064", name: "Khao Lak Center (Phang Nga)", latitude: 8.6508, longitude: 98.2526, status: "Charging", current_load_kw: 45.0 },
+            { station_id: "ST-065", name: "Central Festival Samui", latitude: 9.5327, longitude: 100.0416, status: "Charging", current_load_kw: 110.0 },
+            { station_id: "ST-066", name: "Surat Thani Railway Station", latitude: 9.1033, longitude: 99.2312, status: "Fault", current_load_kw: 0.0 },
+            { station_id: "ST-067", name: "Central Plaza Nakhon Si Thammarat", latitude: 8.4069, longitude: 99.9649, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-068", name: "Wat Phra Mahathat (Nakhon Si)", latitude: 8.4116, longitude: 99.9664, status: "Charging", current_load_kw: 30.0 },
+            { station_id: "ST-069", name: "Samila Beach (Songkhla)", latitude: 7.2154, longitude: 100.5960, status: "Offline", current_load_kw: 0.0 },
+            { station_id: "ST-070", name: "Prince of Songkla University (Hat Yai)", latitude: 7.0084, longitude: 100.4980, status: "Charging", current_load_kw: 75.0 },
+            { station_id: "ST-071", name: "Robinson Lifestyle Trang", latitude: 7.5501, longitude: 99.6247, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-072", name: "Phatthalung City Hall", latitude: 7.6166, longitude: 100.0768, status: "Charging", current_load_kw: 22.0 },
+            { station_id: "ST-073", name: "Pak Bara Pier (Satun)", latitude: 6.8488, longitude: 99.7758, status: "Available", current_load_kw: 0.0 },
+            { station_id: "ST-074", name: "Betong Clock Tower (Yala)", latitude: 5.7709, longitude: 101.0711, status: "Charging", current_load_kw: 50.0 },
+        ];
+
+
+        // --- Map Dashboard Component ---
+        const MapDashboard = {
+            template: `<div id="map" class="w-full h-full z-0"></div>`,
+            props: { stations: { type: Array, required: true } },
+            emits: ['select-station'],
+            setup(props, { emit }) {
+                let map = null;
+                let markers = [];
+
+
+                const getMarkerClass = (status) => {
+                    switch (status) {
+                        case 'Available': return 'marker-available';
+                        case 'Charging': return 'marker-charging';
+                        case 'Fault': return 'marker-fault';
+                        default: return 'marker-offline';
+                    }
+                };
+
+
+                const getMarkerIcon = (status) => {
+                    switch (status) {
+                        case 'Available': return 'fa-check';
+                        case 'Charging': return 'fa-bolt';
+                        case 'Fault': return 'fa-triangle-exclamation';
+                        default: return 'fa-plug-circle-xmark';
+                    }
+                };
+
+
+                const initMap = () => {
+                    map = L.map('map', { zoomControl: false }).setView([13.68, 100.60], 11);
+                    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+                        attribution: '&copy; OpenStreetMap contributors', subdomains: 'abcd', maxZoom: 20
+                    }).addTo(map);
+                    L.control.zoom({ position: 'bottomright' }).addTo(map);
+                    updateMarkers();
+                };
+
+
+                const updateMarkers = () => {
+                    if (!map) return;
+                    markers.forEach(m => map.removeLayer(m));
+                    markers = [];
+                    props.stations.forEach(station => {
+                        const iconHtml = `<div class="custom-marker w-8 h-8 ${getMarkerClass(station.status)}"><i class="fa-solid ${getMarkerIcon(station.status)} text-xs"></i></div>`;
+                        const customIcon = L.divIcon({ html: iconHtml, className: '', iconSize: [32, 32], iconAnchor: [16, 16] });
+                        const marker = L.marker([station.latitude, station.longitude], { icon: customIcon })
+                            .addTo(map)
+                            .on('click', () => {
+                                emit('select-station', station);
+                                map.panTo([station.latitude, station.longitude], { animate: true, duration: 0.5 });
+                            });
+                        markers.push(marker);
+                    });
+                };
+
+
+                onMounted(initMap);
+                watch(() => props.stations, updateMarkers, { deep: true });
+                return {};
+            }
+        };
+
+
+        // --- PQM Dashboard Component ---
+        const PqmDashboard = {
+            template: `
+                <div class="bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-6">
+                    <div class="bg-gray-50 w-full max-w-7xl h-full max-h-[90vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-slate-200">
+                       
+                        <!-- Header -->
+                        <div class="px-6 py-4 bg-white border-b border-slate-200 flex justify-between items-center shrink-0">
+                            <div class="flex items-center gap-4">
+                                <div class="bg-indigo-100 p-2.5 rounded-lg text-indigo-600">
+                                    <i class="fa-solid fa-wave-square text-xl"></i>
+                                </div>
+                                <div>
+                                    <h2 class="text-xl font-bold text-slate-800">Power Quality Analysis (PQM)</h2>
+                                    <p class="text-sm text-slate-500">{{ station.station_id }} &bull; {{ station.name }}</p>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <div v-if="isFetching" class="flex items-center text-xs text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full">
+                                    <i class="fa-solid fa-circle-notch fa-spin mr-2"></i> Live Updates Active
+                                </div>
+                                <button @click="$emit('close')" class="text-slate-400 hover:text-slate-800 hover:bg-slate-100 p-2 rounded-full transition-colors">
+                                    <i class="fa-solid fa-xmark text-xl w-6 h-6 flex items-center justify-center"></i>
+                                </button>
+                            </div>
+                        </div>
+
+
+                        <!-- Dashboard Grid Content -->
+                        <div class="flex-1 p-6 overflow-y-auto grid grid-cols-12 gap-6">
+                           
+                            <!-- 1. Transients (Waveform) -->
+                            <div class="col-span-12 lg:col-span-8 bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col min-h-[300px]">
+                                <h3 class="text-sm font-semibold text-slate-700 mb-2 border-b border-slate-100 pb-2"><i class="fa-solid fa-bolt text-yellow-500 mr-2"></i> Transients & Waveform (50Hz)</h3>
+                                <div ref="waveformRef" class="flex-1 w-full min-h-[250px]"></div>
+                            </div>
+
+
+                            <!-- 2. Harmonics -->
+                            <div class="col-span-12 lg:col-span-4 bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col min-h-[300px]">
+                                <h3 class="text-sm font-semibold text-slate-700 mb-2 border-b border-slate-100 pb-2"><i class="fa-solid fa-chart-column text-indigo-500 mr-2"></i> Harmonics Spectrum</h3>
+                                <div class="flex justify-between mb-2">
+                                    <div class="text-center bg-indigo-50 rounded-lg py-2 w-[48%] border border-indigo-100">
+                                        <div class="text-xs text-indigo-600 font-bold uppercase">THDv</div>
+                                        <div class="text-xl font-bold" :class="pqmData?.harmonics?.thdv > 5 ? 'text-rose-500' : 'text-slate-800'">
+                                            {{ pqmData?.harmonics?.thdv || '0.0' }}%
+                                        </div>
+                                    </div>
+                                    <div class="text-center bg-indigo-50 rounded-lg py-2 w-[48%] border border-indigo-100">
+                                        <div class="text-xs text-indigo-600 font-bold uppercase">THDi</div>
+                                        <div class="text-xl font-bold" :class="pqmData?.harmonics?.thdi > 10 ? 'text-rose-500' : 'text-slate-800'">
+                                            {{ pqmData?.harmonics?.thdi || '0.0' }}%
+                                        </div>
+                                    </div>
+                                </div>
+                                <div ref="harmonicsRef" class="flex-1 w-full min-h-[180px]"></div>
+                            </div>
+
+
+                            <!-- 3. Fluctuation -->
+                            <div class="col-span-12 lg:col-span-8 bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col min-h-[300px]">
+                                <h3 class="text-sm font-semibold text-slate-700 mb-2 border-b border-slate-100 pb-2"><i class="fa-solid fa-chart-area text-emerald-500 mr-2"></i> Voltage Fluctuation (60s Trend)</h3>
+                                <div ref="fluctuationRef" class="flex-1 w-full min-h-[250px]"></div>
+                            </div>
+
+
+                            <!-- 4. Status Badges & Gauges -->
+                            <div class="col-span-12 lg:col-span-4 grid grid-cols-2 gap-4 auto-rows-max">
+                               
+                                <!-- Power Frequency -->
+                                <div class="col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-5 text-center flex flex-col justify-center items-center">
+                                    <div class="text-xs font-bold text-slate-500 uppercase mb-1">Power Frequency</div>
+                                    <div class="text-4xl font-bold text-slate-800">
+                                        {{ pqmData?.frequency || '0.00' }} <span class="text-base text-slate-400 font-normal">Hz</span>
+                                    </div>
+                                    <div class="w-full bg-slate-200 h-1.5 rounded-full mt-3 overflow-hidden">
+                                        <div class="bg-blue-500 h-full rounded-full transition-all duration-300" :style="{ width: ((pqmData?.frequency - 49) / 2 * 100) + '%' }"></div>
+                                    </div>
+                                </div>
+
+
+                                <!-- Voltage Unbalance -->
+                                <div class="col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center justify-between">
+                                    <div>
+                                        <div class="text-xs font-bold text-slate-500 uppercase mb-1">Voltage Unbalance</div>
+                                        <div class="text-2xl font-bold" :class="(pqmData?.voltage_unbalance || 0) > 2.0 ? 'text-rose-500' : 'text-slate-800'">
+                                            {{ pqmData?.voltage_unbalance || '0.0' }}%
+                                        </div>
+                                    </div>
+                                    <i class="fa-solid fa-scale-unbalanced text-3xl opacity-20" :class="(pqmData?.voltage_unbalance || 0) > 2.0 ? 'text-rose-500' : 'text-slate-800'"></i>
+                                </div>
+
+
+                                <!-- Short Duration (Sags/Swells) -->
+                                <div class="col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                                    <h3 class="text-xs font-bold text-slate-500 uppercase mb-3 border-b border-slate-100 pb-1">Anomalies Detected</h3>
+                                    <div class="space-y-3">
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-sm text-slate-600">Sags (Dips)</span>
+                                            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold" :class="(pqmData?.short_duration_vars?.sags || 0) > 0 ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'">
+                                                {{ pqmData?.short_duration_vars?.sags || 0 }}
+                                            </span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-sm text-slate-600">Swells</span>
+                                            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold" :class="(pqmData?.short_duration_vars?.swells || 0) > 0 ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'">
+                                                {{ pqmData?.short_duration_vars?.swells || 0 }}
+                                            </span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-sm text-slate-600">Under/Overvoltage</span>
+                                            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold" :class="pqmData?.long_duration_vars?.undervoltage || pqmData?.long_duration_vars?.overvoltage ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'">
+                                                {{ (pqmData?.long_duration_vars?.undervoltage || pqmData?.long_duration_vars?.overvoltage) ? 'DETECTED' : 'NORMAL' }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            props: { station: { type: Object, required: true } },
+            emits: ['close'],
+            setup(props) {
+                const waveformRef = ref(null);
+                const harmonicsRef = ref(null);
+                const fluctuationRef = ref(null);
+               
+                const pqmData = ref(null);
+                const isFetching = ref(false);
+                let pollInterval = null;
+
+
+                // ECharts Instances
+                let waveformChart, harmonicsChart, fluctuationChart;
+
+
+                // --- Fallback Mock Generator ---
+                const fallbackFluctuationHistory = Array.from({length: 60}, (_, i) => ({
+                    time: new Date(Date.now() - (60-i)*1000).toLocaleTimeString('en-US', { hour12: false }),
+                    value: 230 + Math.random() - 0.5
+                }));
+
+
+                const generateMockPQM = () => {
+                    const timeNow = Date.now();
+                    const isFault = props.station.status === 'Fault';
+                   
+                    // Waveform (100 pts)
+                    const waveform = [];
+                    for(let i=0; i<100; i++) {
+                        let val = Math.sin(2 * Math.PI * (i/100)) * 325;
+                        if (isFault && i > 40 && i < 45) val += (Math.random() * 200 + 100); // transient spike
+                        waveform.push(val.toFixed(1));
+                    }
+
+
+                    // Fluctuation Update
+                    const nowStr = new Date().toLocaleTimeString('en-US', { hour12: false });
+                    let newVal = 230 + Math.sin(timeNow/2000)*2 + (Math.random() - 0.5);
+                    if (isFault) newVal *= 0.85; // Sag simulation
+                    fallbackFluctuationHistory.shift();
+                    fallbackFluctuationHistory.push({ time: nowStr, value: newVal });
+
+
+                    return {
+                        transients: { waveform },
+                        harmonics: {
+                            thdv: isFault ? (8.0 + Math.random()*4).toFixed(2) : (2.1 + Math.random()*0.2).toFixed(2),
+                            thdi: isFault ? (15.0 + Math.random()*5).toFixed(2) : (4.5 + Math.random()*0.5).toFixed(2),
+                            spectrum: [100, Math.random()*2, Math.random()*15, Math.random(), Math.random()*8, 0, Math.random()*4]
+                        },
+                        fluctuation: [...fallbackFluctuationHistory],
+                        frequency: (50.0 + Math.sin(timeNow/5000)*0.02 + (Math.random()-0.5)*0.01).toFixed(3),
+                        voltage_unbalance: isFault ? (2.5 + Math.random()*2).toFixed(2) : (0.2 + Math.random()*0.3).toFixed(2),
+                        short_duration_vars: { sags: isFault ? 3 : 0, swells: 0, interruptions: 0 },
+                        long_duration_vars: { undervoltage: isFault, overvoltage: false }
+                    };
+                };
+
+
+                const fetchPQM = async () => {
+                    isFetching.value = true;
+                    try {
+                        const res = await fetch(`${API_BASE}/stations/${props.station.station_id}/pqm`);
+                        if (!res.ok) throw new Error();
+                        pqmData.value = await res.json();
+                    } catch (e) {
+                        pqmData.value = generateMockPQM(); // Fallback
+                    }
+                    updateCharts();
+                    isFetching.value = false;
+                };
+
+
+                const updateCharts = () => {
+                    if (!pqmData.value || !waveformChart) return;
+                    waveformChart.setOption({ series: [{ data: pqmData.value.transients.waveform }] });
+                    harmonicsChart.setOption({ series: [{ data: pqmData.value.harmonics.spectrum }] });
+                    fluctuationChart.setOption({
+                        xAxis: { data: pqmData.value.fluctuation.map(d => d.time) },
+                        series: [{ data: pqmData.value.fluctuation.map(d => d.value) }]
+                    });
+                };
+
+
+                const initCharts = () => {
+                    const commonGrid = { top: 30, right: 20, bottom: 30, left: 50 };
+
+
+                    waveformChart = echarts.init(waveformRef.value);
+                    waveformChart.setOption({
+                        grid: commonGrid, tooltip: { trigger: 'axis' },
+                        xAxis: { type: 'category', boundaryGap: false, show: false, data: Array.from({length:100},(_,i)=>i) },
+                        yAxis: { type: 'value', name: 'Voltage (V)' },
+                        series: [{
+                            type: 'line', smooth: true, symbol: 'none',
+                            lineStyle: { color: '#eab308', width: 2 },
+                            areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(234,179,8,0.3)'}, {offset: 1, color: 'rgba(234,179,8,0)'}]) },
+                            data: []
+                        }]
+                    });
+
+
+                    harmonicsChart = echarts.init(harmonicsRef.value);
+                    harmonicsChart.setOption({
+                        grid: { top: 10, right: 10, bottom: 20, left: 30 }, tooltip: { trigger: 'axis' },
+                        xAxis: { type: 'category', data: ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th'], axisTick: {alignWithLabel: true} },
+                        yAxis: { type: 'value', show: false },
+                        series: [{ type: 'bar', barWidth: '60%', itemStyle: { color: '#6366f1', borderRadius: [4, 4, 0, 0] }, data: [] }]
+                    });
+
+
+                    fluctuationChart = echarts.init(fluctuationRef.value);
+                    fluctuationChart.setOption({
+                        grid: commonGrid, tooltip: { trigger: 'axis' },
+                        xAxis: { type: 'category', boundaryGap: false, data: [] },
+                        yAxis: { type: 'value', min: 'dataMin', max: 'dataMax', name: 'RMS (V)' },
+                        series: [{
+                            type: 'line', smooth: true, symbol: 'none',
+                            lineStyle: { color: '#10b981', width: 2 },
+                            areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(16,185,129,0.3)'}, {offset: 1, color: 'rgba(16,185,129,0)'}]) },
+                            data: []
+                        }]
+                    });
+
+
+                    const resizeHandler = () => {
+                        waveformChart?.resize();
+                        harmonicsChart?.resize();
+                        fluctuationChart?.resize();
+                    };
+                    window.addEventListener('resize', resizeHandler);
+                    return resizeHandler;
+                };
+
+
+                let resizeListener = null;
+
+
+                onMounted(async () => {
+                    await nextTick();
+                    resizeListener = initCharts();
+                    fetchPQM();
+                    pollInterval = setInterval(fetchPQM, 3000);
+                });
+
+
+                onUnmounted(() => {
+                    if (pollInterval) clearInterval(pollInterval);
+                    if (resizeListener) window.removeEventListener('resize', resizeListener);
+                    waveformChart?.dispose();
+                    harmonicsChart?.dispose();
+                    fluctuationChart?.dispose();
+                });
+
+
+                return { waveformRef, harmonicsRef, fluctuationRef, pqmData, isFetching };
+            }
+        };
+
+
+        // --- Main Application ---
+        const app = createApp({
+            components: {
+                'map-dashboard': MapDashboard,
+                'pqm-dashboard': PqmDashboard
+            },
+            setup() {
+                const stations = ref([]);
+                const selectedStation = ref(null);
+                const telemetry = ref(null);
+                const isConnected = ref(true);
+                const isPqmOpen = ref(false);
+                let telemetryInterval = null;
+
+
+                // Control State Variables
+                const stationLimits = ref({}); // Persists slider states across clicks
+                const curtailmentValue = ref(100);
+                const savedCurtailmentValue = ref(100);
+                const isSavingCurtailment = ref(false);
+
+
+                const statusConfig = {
+                    'Available': { class: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'fa-solid fa-check' },
+                    'Charging': { class: 'bg-amber-100 text-amber-700 border-amber-200', icon: 'fa-solid fa-bolt' },
+                    'Fault': { class: 'bg-rose-100 text-rose-700 border-rose-200', icon: 'fa-solid fa-triangle-exclamation' },
+                    'Offline': { class: 'bg-slate-100 text-slate-700 border-slate-200', icon: 'fa-solid fa-plug-circle-xmark' }
+                };
+
+
+                const fetchStations = async () => {
+                    try {
+                        const response = await fetch(`${API_BASE}/stations`);
+                        if (!response.ok) throw new Error('Network response was not ok');
+                        stations.value = await response.json();
+                        isConnected.value = true;
+                    } catch (error) {
+                        stations.value = FALLBACK_STATIONS;
+                        isConnected.value = false;
+                    }
+                };
+
+
+                const fetchTelemetry = async (stationId) => {
+                    try {
+                        const response = await fetch(`${API_BASE}/stations/${stationId}/telemetry`);
+                        if (!response.ok) throw new Error('API Error');
+                        telemetry.value = await response.json();
+                    } catch (error) {
+                        const station = stations.value.find(s => s.station_id === stationId);
+                        const limitMultiplier = (stationLimits.value[stationId] ?? 100) / 100;
+                       
+                        const v = station.status === 'Fault' ? 180 : 230 + (Math.random() * 3 - 1.5);
+                        const baseLoad = station.status === 'Charging' ? 30 : 0;
+                        // Apply simulated local curtailment modifier
+                        const targetLoad = baseLoad * limitMultiplier;
+                        const l = targetLoad + (targetLoad > 0 ? Math.random() : 0);
+                        const c = (l * 1000) / v;
+                       
+                        telemetry.value = {
+                            timestamp: new Date().toISOString(),
+                            voltage: v,
+                            current: c,
+                            load_kw: l
+                        };
+                    }
+                };
+
+
+                const handleStationSelect = (station) => {
+                    selectedStation.value = station;
+                    telemetry.value = null;
+
+
+                    // Restore slider values
+                    const limit = stationLimits.value[station.station_id] ?? 100;
+                    curtailmentValue.value = limit;
+                    savedCurtailmentValue.value = limit;
+
+
+                    if (telemetryInterval) clearInterval(telemetryInterval);
+                    fetchTelemetry(station.station_id);
+                    telemetryInterval = setInterval(() => fetchTelemetry(station.station_id), 2000);
+                };
+
+
+                const closeSidebar = () => {
+                    selectedStation.value = null;
+                    if (telemetryInterval) clearInterval(telemetryInterval);
+                };
+
+
+                const openPQM = () => {
+                    isPqmOpen.value = true;
+                };
+
+
+                // Slider Control Logic
+                const cancelCurtailment = () => {
+                    curtailmentValue.value = savedCurtailmentValue.value;
+                };
+
+
+                const confirmCurtailment = async () => {
+                    if (!selectedStation.value) return;
+                   
+                    isSavingCurtailment.value = true;
+                    const targetStationId = selectedStation.value.station_id;
+                    const targetValue = curtailmentValue.value;
+
+
+                    try {
+                        const response = await fetch(`${API_BASE}/stations/${targetStationId}/curtailment`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ max_current_percentage: targetValue })
+                        });
+                       
+                        if (!response.ok) throw new Error('API Error');
+                       
+                        savedCurtailmentValue.value = targetValue;
+                        stationLimits.value[targetStationId] = targetValue;
+                    } catch (error) {
+                        // Mock Mode Handling
+                        console.warn('Backend offline: Simulating curtailment update locally.');
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                       
+                        savedCurtailmentValue.value = targetValue;
+                        stationLimits.value[targetStationId] = targetValue;
+                    } finally {
+                        isSavingCurtailment.value = false;
+                    }
+                };
+
+
+                onMounted(() => {
+                    fetchStations();
+                    setInterval(fetchStations, 10000);
+                });
+
+
+                onUnmounted(() => {
+                    if (telemetryInterval) clearInterval(telemetryInterval);
+                });
+
+
+                return {
+                    stations, selectedStation, telemetry, isConnected, statusConfig,
+                    handleStationSelect, closeSidebar,
+                    openPQM, isPqmOpen,
+                    // Slider exposed to template
+                    curtailmentValue, savedCurtailmentValue, isSavingCurtailment,
+                    cancelCurtailment, confirmCurtailment
+                };
+            }
+        });
+
+
+        app.mount('#app');
+    </script>
+</body>
+</html>

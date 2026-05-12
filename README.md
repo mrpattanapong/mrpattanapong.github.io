@@ -34,5 +34,4 @@ Administrative interface for managing power distribution and load balancing.
 * **API Synchronization** – Dispatch an API request to the backend upon confirmation; update UI state only after receiving a "Success" response.
 
 ---
-**Project:** ENG55 1209 ARTIFICIAL INTELLIGENCE FOR ENGINEERS  
 **Maintainer:** [mrpattanapong](https://github.com/mrpattanapong)

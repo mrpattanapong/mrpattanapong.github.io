@@ -112,9 +112,15 @@
 
                     <!-- Real-Time Telemetry -->
                     <div class="p-5 flex-1 overflow-y-auto">
-                        <h3 class="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
-                            <i class="fa-solid fa-chart-line text-blue-500"></i> Real-Time Telemetry
-                        </h3>
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                                <i class="fa-solid fa-chart-line text-blue-500"></i> Real-Time Telemetry
+                            </h3>
+                            <!-- เพิ่ม Badge บอกเฟส -->
+                            <span v-if="telemetry" class="px-2 py-1 bg-slate-100 text-slate-600 border border-slate-200 text-xs font-bold rounded shadow-sm">
+                                {{ telemetry.phase === 3 ? '3-Phase (400V)' : '1-Phase (230V)' }}
+                            </span>
+                        </div>
                        
                         <div v-if="telemetry" class="grid grid-cols-2 gap-4">
                             <!-- Voltage -->
@@ -603,13 +609,22 @@
                 const generateMockPQM = () => {
                     const timeNow = Date.now();
                     const isFault = props.station.status === 'Fault';
+                    const phase = props.station.phase || 1; // จำลองว่าดึงเฟสมาได้
                    
                     // Waveform (100 pts)
                     const waveform = [];
                     for(let i=0; i<100; i++) {
-                        let val = Math.sin(2 * Math.PI * (i/100)) * 325;
-                        if (isFault && i > 40 && i < 45) val += (Math.random() * 200 + 100); // transient spike
-                        waveform.push(val.toFixed(1));
+                        const t = i / 100;
+                        let l1 = Math.sin(2 * Math.PI * t) * 325;
+                        if (isFault && i > 40 && i < 45) l1 += (Math.random() * 200 + 100);
+                        
+                        let point = { L1: l1.toFixed(1) };
+                        
+                        if (phase === 3) {
+                            point.L2 = (Math.sin(2 * Math.PI * t - (2 * Math.PI / 3)) * 325).toFixed(1);
+                            point.L3 = (Math.sin(2 * Math.PI * t + (2 * Math.PI / 3)) * 325).toFixed(1);
+                        }
+                        waveform.push(point);
                     }
 
 
@@ -653,7 +668,19 @@
 
                 const updateCharts = () => {
                     if (!pqmData.value || !waveformChart) return;
-                    waveformChart.setOption({ series: [{ data: pqmData.value.transients.waveform }] });
+
+                    // แยกข้อมูล L1, L2, L3 ออกจาก Object ที่ Backend ส่งมา
+                    const waveData = pqmData.value.transients.waveform;
+                    const is3Phase = waveData.length > 0 && waveData[0].L2 !== undefined;
+
+                    waveformChart.setOption({ 
+                        series: [
+                            { data: waveData.map(d => d.L1 !== undefined ? d.L1 : d) }, // รองรับแบบเก่ากันพัง
+                            { data: is3Phase ? waveData.map(d => d.L2) : [] },
+                            { data: is3Phase ? waveData.map(d => d.L3) : [] }
+                        ] 
+                    });
+
                     harmonicsChart.setOption({ series: [{ data: pqmData.value.harmonics.spectrum }] });
                     fluctuationChart.setOption({
                         xAxis: { data: pqmData.value.fluctuation.map(d => d.time) },
@@ -668,15 +695,28 @@
 
                     waveformChart = echarts.init(waveformRef.value);
                     waveformChart.setOption({
-                        grid: commonGrid, tooltip: { trigger: 'axis' },
+                        grid: commonGrid, 
+                        tooltip: { trigger: 'axis' },
+                        legend: { data: ['L1', 'L2', 'L3'], top: 0, right: 0, textStyle: { fontSize: 10 } }, // เพิ่ม Legend
                         xAxis: { type: 'category', boundaryGap: false, show: false, data: Array.from({length:100},(_,i)=>i) },
                         yAxis: { type: 'value', name: 'Voltage (V)' },
-                        series: [{
-                            type: 'line', smooth: true, symbol: 'none',
-                            lineStyle: { color: '#eab308', width: 2 },
-                            areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(234,179,8,0.3)'}, {offset: 1, color: 'rgba(234,179,8,0)'}]) },
-                            data: []
-                        }]
+                        series: [
+                            {
+                                name: 'L1', type: 'line', smooth: true, symbol: 'none',
+                                lineStyle: { color: '#eab308', width: 2 },
+                                data: []
+                            },
+                            {
+                                name: 'L2', type: 'line', smooth: true, symbol: 'none',
+                                lineStyle: { color: '#3b82f6', width: 2 }, // สีฟ้า
+                                data: []
+                            },
+                            {
+                                name: 'L3', type: 'line', smooth: true, symbol: 'none',
+                                lineStyle: { color: '#ef4444', width: 2 }, // สีแดง
+                                data: []
+                            }
+                        ]
                     });
 
 
@@ -792,23 +832,34 @@
                     } catch (error) {
                         const station = stations.value.find(s => s.station_id === stationId);
                         const limitMultiplier = (stationLimits.value[stationId] ?? 100) / 100;
-                       
+                        
+                        // สมมติเฟสแบบสุ่มถ้าไม่มีข้อมูล
+                        if (!station.phase) station.phase = Math.random() > 0.5 ? 3 : 1; 
+
                         const v = station.status === 'Fault' ? 180 : 230 + (Math.random() * 3 - 1.5);
                         const baseLoad = station.status === 'Charging' ? 30 : 0;
-                        // Apply simulated local curtailment modifier
                         const targetLoad = baseLoad * limitMultiplier;
                         const l = targetLoad + (targetLoad > 0 ? Math.random() : 0);
-                        const c = (l * 1000) / v;
+                        
+                        // คำนวณกระแสให้ตรงตามเฟส
+                        let reportedVoltage = v;
+                        let c = 0;
+                        if (station.phase === 1) {
+                            c = (l * 1000) / v;
+                        } else {
+                            reportedVoltage = v * Math.sqrt(3);
+                            c = (l * 1000) / (Math.sqrt(3) * reportedVoltage);
+                        }
                        
                         telemetry.value = {
                             timestamp: new Date().toISOString(),
-                            voltage: v,
+                            phase: station.phase,
+                            voltage: reportedVoltage,
                             current: c,
                             load_kw: l
                         };
                     }
                 };
-
 
                 // --- AI Logic ---
                 const fetchAiForecast = async (stationId) => {
